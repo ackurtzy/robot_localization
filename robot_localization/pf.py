@@ -361,8 +361,42 @@ class ParticleFilter(Node):
         r: the distance readings to obstacles
         theta: the angle relative to the robot frame for each corresponding reading
         """
-        # TODO: implement this
-        pass
+        # Removes radius values that are greater than a certain value
+        for i in range(len(r)):
+            if radius > 5:
+                r.pop(i)
+                theta.pop(i)
+
+        # Creates an empty array for x,y coordinates for scan endpoints
+        x_orig = []
+        y_orig = []
+
+        # Converts the scan endpoints from r,theta to x,y
+        for i, radius in enumerate(r):
+            x_orig(i) = radius * np.cos(theta(i))
+            y_orig(i) = radius * np.sin(theta(i))
+
+        # Creating new arrays for the updated values of x,y for each scan endpoint
+        x_final = []
+        y_final = []
+
+        # Iterating through each particle, creating a rotation matrix using its heading, and rotating each of the scan endpoints
+        for i, part in enumerate(self.particle_cloud):
+
+            rotation_amt = part.theta
+
+            rotation_matrix = np.array(
+                (
+                    [np.cos(rotation_amt), -np.sin(rotation_amt)],
+                    [np.sin(rotation_amt), np.cos(rotation_amt)],
+                )
+            )
+
+            current_x_y = np.array([x_orig[i], y_orig[i]]).reshape(-1, 1)
+            rotated_x_y = rotation_matrix @ current_x_y
+            x_final[i] = float(rotated_x_y[0]) + part.x
+            y_final[i] = float(rotated_x_y[1]) + part.y
+
 
     def update_initial_pose(self, msg):
         """
