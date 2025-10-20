@@ -81,7 +81,7 @@ class ParticleFilter(Node):
 
     def __init__(self):
         """
-        Intialize the particle filter
+        Initialize the particle filter
         """
         super().__init__("pf")
         self.base_frame = "base_footprint"  # the frame of the robot base
@@ -89,7 +89,7 @@ class ParticleFilter(Node):
         self.odom_frame = "odom"  # the name of the odometry coordinate frame
         self.scan_topic = "scan"  # the topic where we will get laser scans from
 
-        self.n_particles = 2  # the number of particles to use
+        self.n_particles = 300  # the number of particles to use
 
         self.d_thresh = 0.2  # the amount of linear movement before performing an update
         self.a_thresh = (
@@ -361,24 +361,26 @@ class ParticleFilter(Node):
         r: the distance readings to obstacles
         theta: the angle relative to the robot frame for each corresponding reading
         """
+
         # Removes radius values that are greater than a certain value
         for i in range(len(r)):
             if radius > 5:
-                r.pop(i)
-                theta.pop(i)
+                del r[i]
+                del theta[i]
 
         # Creates an empty array for x,y coordinates for scan endpoints
-        x_orig = []
-        y_orig = []
+        x_orig = np.array([])
+        y_orig = np.array([])
 
         # Converts the scan endpoints from r,theta to x,y
         for i, radius in enumerate(r):
-            x_orig(i) = radius * np.cos(theta(i))
-            y_orig(i) = radius * np.sin(theta(i))
+            x_orig[i] = radius * np.cos(theta[i])
+            y_orig[i] = radius * np.sin(theta[i])
 
         # Creating new arrays for the updated values of x,y for each scan endpoint
-        x_final = []
-        y_final = []
+        x_final = np.array([])
+        y_final = np.array([])
+        part_weights = np.array([])
 
         # Iterating through each particle, creating a rotation matrix using its heading, and rotating each of the scan endpoints
         for i, part in enumerate(self.particle_cloud):
@@ -392,11 +394,25 @@ class ParticleFilter(Node):
                 )
             )
 
+            # Applies the rotation matrix to the x,y of the particle using matrix multiplication
             current_x_y = np.array([x_orig[i], y_orig[i]]).reshape(-1, 1)
             rotated_x_y = rotation_matrix @ current_x_y
+
+            # Translates the scan endpoint using the position of the particle
             x_final[i] = float(rotated_x_y[0]) + part.x
             y_final[i] = float(rotated_x_y[1]) + part.y
 
+            # Fills the weight array with distance values
+            part_weights[i] = OccupancyField.get_closest_obstacle_distance(x_final[i], y_final[i])
+
+        # Finds the max distance
+        max_distance = np.max(part_weights)
+        
+        # Subtracts every distance by the max distance 
+        for i in range(len(part_weights)):
+            part_weights[i] -= max_distance
+
+        part_weights = np.abs(part_weights)
 
     def update_initial_pose(self, msg):
         """
