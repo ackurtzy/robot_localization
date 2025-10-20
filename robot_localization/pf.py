@@ -225,7 +225,7 @@ class ParticleFilter(Node):
         Update the estimate of the robot's pose with the particles.
 
         Chooses the particle with the highest weight and updates
-        the map to odom transform accordining to it's location.
+        the map to odom transform according to it's location.
         """
         # first make sure that the particle weights are normalized
         self.normalize_particles()
@@ -360,6 +360,14 @@ class ParticleFilter(Node):
         """Updates the particle weights in response to the scan data
         r: the distance readings to obstacles
         theta: the angle relative to the robot frame for each corresponding reading
+
+        Taking in the current laser scan data of the Neato, it removes large radius values
+        then converts them from polar form (r, theta) to cartesian form (x, y).
+
+        Iterating through each particle in the cloud, it notes the heading and rotates the laser
+        scan endpoints by that amount, translating them by the particles coordinates. Using
+        the occupancy field method to get the closest object to a coordinate and subtracting every
+        value by the largest error, the particle weight are set.
         """
 
         # Removes radius values that are greater than a certain value
@@ -409,10 +417,9 @@ class ParticleFilter(Node):
         max_distance = np.max(part_weights)
         
         # Subtracts every distance by the max distance 
-        for i in range(len(part_weights)):
+        for i, part in enumerate(self.particle_cloud):
             part_weights[i] -= max_distance
-
-        part_weights = np.abs(part_weights)
+            part.w = part_weights[i]
 
     def update_initial_pose(self, msg):
         """
