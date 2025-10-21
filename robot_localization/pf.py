@@ -104,16 +104,11 @@ class ParticleFilter(Node):
             math.pi / 10
         )  # the amount of angular movement before performing an update
 
-        self.resampling_radius_scaling_factor = (
-            0.3  # Size of radius in particle resampling
-        )
-        self.resampling_angle_scaling_factor = (
-            1  # Standard deviation of noise in angle resampling sampling
-        )
-
         self.n_particles_to_avg = (
             5  # Number of particles with best weights to average for robot pose
         )
+
+        self.weight_exponential_sigma = 0.01  # The denominator coefficient of exponential to interpret errors to weights
 
         # pose_listener responds to selection of a new approximate robot location (for instance using rviz)
         self.create_subscription(
@@ -373,18 +368,12 @@ class ParticleFilter(Node):
         )
 
         for index, b_part in enumerate(base_particles):
-            # radius = np.random.normal(
-            #     0, self.resampling_radius_scaling_factor * (1 - b_part.w), 1
-            # )
             radius = np.random.normal(0, 0.1, 1)
             pol_angle = np.random.uniform(0, 2 * math.pi, 1)
 
             new_x = b_part.x + radius * np.cos(pol_angle)
             new_y = b_part.y + radius * np.sin(pol_angle)
 
-            # new_theta = b_part.theta + np.random.normal(
-            #     0, self.resampling_angle_scaling_factor * (1 - b_part.w), 1
-            # )
             new_theta = b_part.theta + np.random.normal(0, 0.26, 1)
 
             # print(f"Resampled particle {index}")
@@ -444,8 +433,6 @@ class ParticleFilter(Node):
         x_final = np.zeros(len(r))
         y_final = np.zeros(len(r))
 
-        max_weight = -float("inf")
-
         # Iterating through each particle, creating a rotation matrix using its heading, and rotating each of the scan endpoints
         for i, part in enumerate(self.particle_cloud):
 
@@ -465,30 +452,20 @@ class ParticleFilter(Node):
             x_final = scan_rotated[0, :] + part.x
             y_final = scan_rotated[1, :] + part.y
 
-            # Fills the weight array with distance values
-            # part.w = 0.0
-            # for x_loc, y_loc in zip(x_final, y_final):
-            #     error = self.occupancy_field.get_closest_obstacle_distance(x_loc, y_loc)
-            #     part.w += error if not math.isnan(error) else 5.0
-            # per particle
+            # Fills the error array with distance values
             errs = []
             for x_loc, y_loc in zip(x_final, y_final):
                 d = self.occupancy_field.get_closest_obstacle_distance(x_loc, y_loc)
                 if math.isnan(d):  # out of map
                     d = 10.0
-                errs.append(d)
+                errs.append()
 
-            sigma = 0.1
-            lik = np.exp(-np.square(errs) / (2 * sigma**2))
-            part.w = float(np.mean(lik) + 1e-12)
+            negative_exponential = np.exp(
+                -np.square(errs) / self.weight_exponential_sigma
+            )
+            part.w = float(np.mean(negative_exponential))
 
             # print(f"New particle weight: {part.w}")
-
-        #     max_weight = max(max_weight, part.w)
-
-        # # Subtracts every distance by the max distance
-        # for i, part in enumerate(self.particle_cloud):
-        #     part.w = float(max_weight - part.w)
 
         self.normalize_particles()
 
