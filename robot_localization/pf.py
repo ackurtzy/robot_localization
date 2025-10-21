@@ -9,12 +9,20 @@ from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 from nav2_msgs.msg import ParticleCloud
 from nav2_msgs.msg import Particle as Nav2Particle
-from geometry_msgs.msg import PoseWithCovarianceStamped, Pose, Point, Quaternion
+from geometry_msgs.msg import (
+    PoseWithCovarianceStamped,
+    Pose,
+    Point,
+    Quaternion,
+    PoseStamped,
+)
+from geometry_msgs.msg import PoseStamped
 from rclpy.duration import Duration
 import math
 import time
 import numpy as np
 import random
+import heapq
 from occupancy_field import OccupancyField
 from helper_functions import TFHelper, draw_random_sample
 from angle_helpers import quaternion_from_euler
@@ -89,7 +97,7 @@ class ParticleFilter(Node):
         self.odom_frame = "odom"  # the name of the odometry coordinate frame
         self.scan_topic = "scan"  # the topic where we will get laser scans from
 
-        self.n_particles = 300  # the number of particles to use
+        self.n_particles = 3000  # the number of particles to use
 
         self.d_thresh = 0.2  # the amount of linear movement before performing an update
         self.a_thresh = (
@@ -97,10 +105,14 @@ class ParticleFilter(Node):
         )  # the amount of angular movement before performing an update
 
         self.resampling_radius_scaling_factor = (
-            0.5  # Size of radius in particle resampling
+            0.3  # Size of radius in particle resampling
         )
         self.resampling_angle_scaling_factor = (
             1  # Standard deviation of noise in angle resampling sampling
+        )
+
+        self.n_particles_to_avg = (
+            5  # Number of particles with best weights to average for robot pose
         )
 
         # pose_listener responds to selection of a new approximate robot location (for instance using rviz)
@@ -113,6 +125,11 @@ class ParticleFilter(Node):
 
         # laser_subscriber listens for data from the lidar
         self.create_subscription(LaserScan, self.scan_topic, self.scan_received, 10)
+
+        # Publish robot's estimated location
+        self.robot_location_pub = self.create_publisher(
+            PoseStamped, "robot_pose_estimate", 10
+        )
 
         # this is used to keep track of the timestamps coming from bag files
         # knowing this information helps us set the timestamp of our map -> odom
@@ -197,7 +214,9 @@ class ParticleFilter(Node):
         elif self.moved_far_enough_to_update(new_odom_xy_theta):
             # we have moved far enough to do an update!
             self.update_particles_with_odom()  # update based on odometry
-            # self.update_particles_with_laser(r, theta)  # update based on laser scan
+            self.update_particles_with_laser(
+                list(r), list(theta)
+            )  # update based on laser scan
             self.update_robot_pose()  # update robot's pose based on particles
             self.resample_particles()  # resample particles to focus on areas of high density
         # publish particles (so things like rviz can see them)
@@ -227,20 +246,40 @@ class ParticleFilter(Node):
         Chooses the particle with the highest weight and updates
         the map to odom transform according to it's location.
         """
-        # first make sure that the particle weights are normalized
-        self.normalize_particles()
+        # highest_weight = -1
+        # for part in self.particle_cloud:
+        #     if part.w > highest_weight:
+        #         best_particle = part
 
-        highest_weight = -1
+        top_n_particles = heapq.nlargest(
+            self.n_particles_to_avg, self.particle_cloud, key=lambda p: p.w
+        )
+
+        x_avg = 0.0
+        y_avg = 0.0
+        theta_avg = 0.0
+        for p in top_n_particles:
+            x_avg += p.x
+            y_avg += p.y
+            theta_avg += p.theta
+
         best_particle = None
-        for part in self.particle_cloud:
-            if part.w > highest_weight:
-                best_particle = part
+        if len(top_n_particles) > 0:
+            x_avg /= len(top_n_particles)
+            y_avg /= len(top_n_particles)
+            theta_avg /= len(top_n_particles)
+            best_particle = Particle(x=x_avg, y=y_avg, theta=theta_avg)
 
         if hasattr(self, "odom_pose") and best_particle:
-            self.robot_pose = best_particle.as_pose()
-            self.transform_helper.fix_map_to_odom_transform(
-                self.robot_pose, self.odom_pose
-            )
+            robot_pose = best_particle.as_pose()
+            self.transform_helper.fix_map_to_odom_transform(robot_pose, self.odom_pose)
+
+            pose_msg = PoseStamped()
+            pose_msg.header.frame_id = self.map_frame
+            pose_msg.header.stamp = self.get_clock().now().to_msg()
+            pose_msg.pose = robot_pose
+            self.robot_location_pub.publish(pose_msg)
+
         elif best_particle is None:
             self.get_logger().warn("Can't update robot pose. No particles")
         else:
@@ -303,8 +342,8 @@ class ParticleFilter(Node):
             old_position = np.array(([part.x], [part.y]))
             new_position = old_position + (r_mat_relative_to_particle @ relative_xy)
 
-            part.x = float(new_position[0])
-            part.y = float(new_position[1])
+            part.x = float(new_position[0].item())
+            part.y = float(new_position[1].item())
             part.theta = part.theta + delta[2]
 
     def resample_particles(self):
@@ -321,40 +360,47 @@ class ParticleFilter(Node):
         coordinates to determine the noise's direction and magnitude. The
         angular noise is similarly sampled and added to the particle's heading.
         """
-        # make sure the distribution is normalized
-        self.normalize_particles()
+        choices = [part for part in self.particle_cloud]
+        probabilities = [part.w for part in self.particle_cloud]
+
+        # print(f"Num choices: {len(choices)}")
+        # print(f"Num probabilities: {len(probabilities)}")
 
         base_particles = draw_random_sample(
-            [part for part in self.particle_cloud],
-            [part.w for part in self.particle_cloud],
+            choices,
+            probabilities,
             self.n_particles,
         )
 
         for index, b_part in enumerate(base_particles):
-            radius = np.random.normal(
-                0, self.resampling_radius_scaling_factor * (1 - b_part.w), 1
-            )
+            # radius = np.random.normal(
+            #     0, self.resampling_radius_scaling_factor * (1 - b_part.w), 1
+            # )
+            radius = np.random.normal(0, 0.1, 1)
             pol_angle = np.random.uniform(0, 2 * math.pi, 1)
 
             new_x = b_part.x + radius * np.cos(pol_angle)
             new_y = b_part.y + radius * np.sin(pol_angle)
 
-            new_theta = b_part.theta + np.random.normal(
-                0, self.resampling_angle_scaling_factor * (1 - b_part.w), 1
-            )
+            # new_theta = b_part.theta + np.random.normal(
+            #     0, self.resampling_angle_scaling_factor * (1 - b_part.w), 1
+            # )
+            new_theta = b_part.theta + np.random.normal(0, 0.26, 1)
 
-            print(f"Resampled particle {index}")
-            print(
-                f"  From: ({self.particle_cloud[index].x}, {self.particle_cloud[index].y}, {np.rad2deg(self.particle_cloud[index].theta)})"
-            )
-            self.particle_cloud[index].x = float(new_x)
-            self.particle_cloud[index].y = float(new_y)
-            self.particle_cloud[index].theta = float(new_theta) % (2.0 * math.pi)
+            # print(f"Resampled particle {index}")
+            # print(
+            #     f"  From: ({self.particle_cloud[index].x}, {self.particle_cloud[index].y}, {np.rad2deg(self.particle_cloud[index].theta)})"
+            # )
+            self.particle_cloud[index].x = float(new_x.item())
+            self.particle_cloud[index].y = float(new_y.item())
+            self.particle_cloud[index].theta = float(new_theta.item()) % (2.0 * math.pi)
             self.particle_cloud[index].w = 1.0
-            print(f"New coords: ({new_x}, {new_y})")
-            print(
-                f"  To: ({self.particle_cloud[index].x}, {self.particle_cloud[index].y}, {np.rad2deg(self.particle_cloud[index].theta)})"
-            )
+            # print(f"New coords: ({new_x}, {new_y})")
+            # print(
+            #     f"  To: ({self.particle_cloud[index].x}, {self.particle_cloud[index].y}, {np.rad2deg(self.particle_cloud[index].theta)})"
+            # )
+
+        self.normalize_particles()
 
     def update_particles_with_laser(self, r, theta):
         """Updates the particle weights in response to the scan data
@@ -369,26 +415,36 @@ class ParticleFilter(Node):
         the occupancy field method to get the closest object to a coordinate and subtracting every
         value by the largest error, the particle weight are set.
         """
+        # Debugging print
+        print(f"Original r len: {len(r)}, original theta len: {len(theta)}")
 
         # Removes radius values that are greater than a certain value
-        for i in range(len(r)):
-            if radius > 5:
-                del r[i]
-                del theta[i]
+        i = 0
+        while i < len(r):
+            if r[i] > 10:
+                r.pop(i)
+                theta.pop(i)
+            else:
+                i += 1
+
+        print(f"Filtered r len: {len(r)}, original theta len: {len(theta)}")
 
         # Creates an empty array for x,y coordinates for scan endpoints
-        x_orig = np.array([])
-        y_orig = np.array([])
+        x_orig = np.zeros(len(r))
+        y_orig = np.zeros(len(r))
 
         # Converts the scan endpoints from r,theta to x,y
         for i, radius in enumerate(r):
             x_orig[i] = radius * np.cos(theta[i])
             y_orig[i] = radius * np.sin(theta[i])
 
+        xy_scan = np.vstack((x_orig, y_orig))
+
         # Creating new arrays for the updated values of x,y for each scan endpoint
-        x_final = np.array([])
-        y_final = np.array([])
-        part_weights = np.array([])
+        x_final = np.zeros(len(r))
+        y_final = np.zeros(len(r))
+
+        max_weight = -float("inf")
 
         # Iterating through each particle, creating a rotation matrix using its heading, and rotating each of the scan endpoints
         for i, part in enumerate(self.particle_cloud):
@@ -403,23 +459,51 @@ class ParticleFilter(Node):
             )
 
             # Applies the rotation matrix to the x,y of the particle using matrix multiplication
-            current_x_y = np.array([x_orig[i], y_orig[i]]).reshape(-1, 1)
-            rotated_x_y = rotation_matrix @ current_x_y
+            scan_rotated = rotation_matrix @ xy_scan
 
             # Translates the scan endpoint using the position of the particle
-            x_final[i] = float(rotated_x_y[0]) + part.x
-            y_final[i] = float(rotated_x_y[1]) + part.y
+            x_final = scan_rotated[0, :] + part.x
+            y_final = scan_rotated[1, :] + part.y
 
             # Fills the weight array with distance values
-            part_weights[i] = OccupancyField.get_closest_obstacle_distance(x_final[i], y_final[i])
+            # part.w = 0.0
+            # for x_loc, y_loc in zip(x_final, y_final):
+            #     error = self.occupancy_field.get_closest_obstacle_distance(x_loc, y_loc)
+            #     part.w += error if not math.isnan(error) else 5.0
+            # per particle
+            errs = []
+            for x_loc, y_loc in zip(x_final, y_final):
+                d = self.occupancy_field.get_closest_obstacle_distance(x_loc, y_loc)
+                if math.isnan(d):  # out of map
+                    d = 10.0
+                errs.append(d)
 
-        # Finds the max distance
-        max_distance = np.max(part_weights)
-        
-        # Subtracts every distance by the max distance 
-        for i, part in enumerate(self.particle_cloud):
-            part_weights[i] -= max_distance
-            part.w = part_weights[i]
+            sigma = 0.1
+            lik = np.exp(-np.square(errs) / (2 * sigma**2))
+            part.w = float(np.mean(lik) + 1e-12)
+
+            # print(f"New particle weight: {part.w}")
+
+        #     max_weight = max(max_weight, part.w)
+
+        # # Subtracts every distance by the max distance
+        # for i, part in enumerate(self.particle_cloud):
+        #     part.w = float(max_weight - part.w)
+
+        self.normalize_particles()
+
+        # print([part.w for part in self.particle_cloud])
+        print(f"Post laser update cloud size: {len(self.particle_cloud)}")
+
+        # Print Distribution of particles to debug
+        weights = [p.w for p in self.particle_cloud]
+        hist, edges = np.histogram(weights, bins=10, range=(0.0, 0.01))
+
+        for i in range(len(hist)):
+            left, right = edges[i], edges[i + 1]
+            print(f"{left:.3f}-{right:.3f}: {hist[i]}")
+
+        # print(weights)
 
     def update_initial_pose(self, msg):
         """
@@ -501,7 +585,7 @@ class ParticleFilter(Node):
         msg.header.frame_id = self.map_frame
         msg.header.stamp = timestamp
         for p in self.particle_cloud:
-            msg.particles.append(Nav2Particle(pose=p.as_pose(), weight=p.w))
+            msg.particles.append(Nav2Particle(pose=p.as_pose(), weight=20.0 * p.w))
         self.particle_pub.publish(msg)
 
     def scan_received(self, msg):
