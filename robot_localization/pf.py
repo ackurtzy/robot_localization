@@ -345,9 +345,8 @@ class ParticleFilter(Node):
         """
         Resample the particle cloud based on current particle weights.
 
-        First, it normalizes the particle weights to ensure they form a valid
-        probability distribution. Then, it draws a weighted random sample of
-        particles proportional to their weights.
+        First, it draws a weighted random sample of particles proportional to
+        their weights.
 
         For each selected particle, it adds noise in both position and
         heading. The positional noise is sampled from a Gaussian distribution
@@ -458,7 +457,7 @@ class ParticleFilter(Node):
                 d = self.occupancy_field.get_closest_obstacle_distance(x_loc, y_loc)
                 if math.isnan(d):  # out of map
                     d = 10.0
-                errs.append()
+                errs.append(d)
 
             negative_exponential = np.exp(
                 -np.square(errs) / self.weight_exponential_sigma
