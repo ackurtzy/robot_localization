@@ -6,6 +6,8 @@ This is the base repo for the Olin Computational Robotics Robot Localization pro
 ## Demo
 This is a demo of the particle filter in action when initialized with a pose estimate.
 
+The green arrows are particles, and the blue arrow is the estimated robot pose. The red dots show the robot’s current laser scan transformed into the map frame using the estimated robot pose. The better the red dots align with the map, the better the pose.
+
 <p align="center">
   <img src="./assets/convergence.gif" width="600" alt="Demo">
 </p>
